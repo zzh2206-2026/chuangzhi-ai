@@ -1,0 +1,7 @@
+# GitHub rejects files larger than 100MB. Keep this archive on disk.
+高楠数据集.zip
+
+__pycache__/
+*.pyc
+.env
+_sizes.txt

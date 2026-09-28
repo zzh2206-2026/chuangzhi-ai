@@ -1,0 +1,14 @@
+---
+description: Save user-requested downloads on D: or E:, never on C:
+alwaysApply: true
+---
+
+# Download location
+
+When the user asks to download datasets, models, repos, or other files:
+
+- Default directory: `E:\Datasets` (more free space).
+- If E: is unavailable or short on space, use `D:\Datasets`.
+- Do not save these downloads under the project on C:, Desktop, or the user profile.
+- Create the target folder if it does not exist, then put the files there.
+- Tell the user the full path after the download finishes.
