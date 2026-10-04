@@ -1,13 +1,15 @@
-"""把华南理工 part_4 筛成官方训练集格式。
+"""把华南理工 part_4 标成官方训练集格式。
 
-两段筛选：
 1. 规则：去掉过短、寒暄、辱骂、概念讲解，并选出预测点。
 2. 模型：DeepSeek / Qwen（OpenAI 兼容接口）判断是否保留，并给情绪和画像伪标签。
+3. 导出：接受的预测点全部写入官方训练集 schema，不按情绪定额截断。
 
 回复文本用助手原文，不由模型改写。memory_refs 固定为 []。
 
+DeepSeek 默认模型 deepseek-flash（接口不接受 deepseek-v4.1-flash 这个名字），地址 https://api.deepseek.com。
+密钥放在仓库根目录 .env 的 DEEPSEEK_API_KEY，或由同名环境变量覆盖。
+
 示例（PowerShell）：
-  $env:DEEPSEEK_API_KEY = "sk-..."
   python 脚本/label_scut_part.py --provider deepseek --stage ping
   python 脚本/label_scut_part.py --provider deepseek --stage rules
   python 脚本/label_scut_part.py --provider deepseek --stage label --max-calls 200
@@ -53,20 +55,12 @@ STYLES = [
     "brief", "detailed", "colloquial", "formal", "direct", "indirect", "humorous",
     "rational", "high_emotional_expression", "low_emotional_expression", "emoji_user",
 ]
-# 第四份约占全库定额的 1/4。不够就不要凑。
-QUOTA = {
-    "surprise": 150, "care": 150, "disgust": 150, "joy": 150, "pride": 150,
-    "fear": 300, "helplessness": 300, "sadness": 300, "loneliness": 300,
-    "shame": 300, "anger": 300, "gratitude": 300, "mixed": 300, "neutral": 300,
-    "anxiety": 200, "relaxed": 200,
-}
-RARE = ["surprise", "care", "disgust", "joy", "pride"]
 CONFUSABLE = ["fear", "helplessness", "sadness", "loneliness", "shame", "anger", "gratitude", "mixed", "neutral"]
 
 PRESETS = {
     "deepseek": {
-        "base_url": "https://api.deepseek.com/v1",
-        "model": "deepseek-chat",
+        "base_url": "https://api.deepseek.com",
+        "model": "deepseek-flash",
         "api_key_env": "DEEPSEEK_API_KEY",
     },
     "qwen": {
@@ -463,7 +457,7 @@ def stage_ping(base_url: str, api_key: str, model: str) -> None:
     print(f"连接成功：{model} @ {base_url}")
 
 
-def stage_label(out_dir: Path, base_url: str, api_key: str, model: str, max_calls: int, concurrency: int, min_confidence: float, seed: int, stop_when_rare: bool) -> None:
+def stage_label(out_dir: Path, base_url: str, api_key: str, model: str, max_calls: int, concurrency: int, min_confidence: float, seed: int) -> None:
     candidates_path = out_dir / "candidates.jsonl"
     labeled_path = out_dir / "labeled.jsonl"
     if not candidates_path.exists():
@@ -505,9 +499,6 @@ def stage_label(out_dir: Path, base_url: str, api_key: str, model: str, max_call
                     if record["accepted"]:
                         accepted_emotions[record["emotion_label"]] += 1
             print(f"本轮已调用 {calls}，当前接受数 {dict(accepted_emotions)}", flush=True)
-            if stop_when_rare and all(accepted_emotions[name] >= QUOTA[name] for name in RARE):
-                print("五类稀有情绪都已达到第四份定额，停止调用。")
-                break
     print(f"标注写入 {labeled_path}")
 
 
@@ -518,17 +509,13 @@ def stage_export(out_dir: Path) -> None:
     latest = {}
     for row in load_jsonl(labeled_path):
         latest[row["candidate_id"]] = row
-    grouped = defaultdict(list)
-    for row in latest.values():
-        if row.get("accepted") and row.get("emotion_label") in QUOTA:
-            grouped[row["emotion_label"]].append(row)
     chosen = []
-    summary = {}
-    for emotion, quota in QUOTA.items():
-        rows = sorted(grouped.get(emotion, []), key=lambda item: float(item.get("confidence") or 0), reverse=True)
-        take = rows[:quota]
-        chosen.extend(take)
-        summary[emotion] = {"accepted": len(rows), "kept": len(take), "quota": quota}
+    summary = Counter()
+    for row in latest.values():
+        emotion = row.get("emotion_label")
+        if row.get("accepted") and emotion in EMOTIONS:
+            chosen.append(row)
+            summary[emotion] += 1
 
     by_dialog = defaultdict(list)
     for row in chosen:
@@ -557,11 +544,26 @@ def stage_export(out_dir: Path) -> None:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
     print(f"对话 {len(by_dialog)}，预测点 {len(chosen)}，写入 {dest}")
     for emotion in EMOTIONS:
-        item = summary[emotion]
-        print(f"{emotion:16} 接受 {item['accepted']:4}  留下 {item['kept']:4}  定额 {item['quota']:4}")
+        print(f"{emotion:16} {summary[emotion]:4}")
+
+
+def load_env_file() -> None:
+    path = ROOT / ".env"
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        text = line.strip()
+        if not text or text.startswith("#") or "=" not in text:
+            continue
+        name, value = text.split("=", 1)
+        name = name.strip()
+        value = value.strip().strip('"').strip("'")
+        if name and name not in os.environ:
+            os.environ[name] = value
 
 
 def resolve_provider(args) -> tuple[str, str, str]:
+    load_env_file()
     preset = PRESETS.get(args.provider, {})
     base_url = args.base_url or preset.get("base_url")
     model = args.model or preset.get("model")
@@ -570,7 +572,7 @@ def resolve_provider(args) -> tuple[str, str, str]:
         raise SystemExit("自定义接口需要 --base-url --model --api-key-env")
     api_key = os.environ.get(key_env, "").strip()
     if not api_key:
-        raise SystemExit(f"环境变量 {key_env} 是空的。不要把密钥写进脚本。")
+        raise SystemExit(f"环境变量 {key_env} 是空的。把密钥放在 .env，不要写进脚本。")
     return base_url, api_key, model
 
 
@@ -588,7 +590,6 @@ def main() -> None:
     parser.add_argument("--concurrency", type=int, default=4)
     parser.add_argument("--min-confidence", type=float, default=0.75)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--stop-when-rare", action="store_true")
     args = parser.parse_args()
     limit = args.limit or None
 
@@ -605,7 +606,7 @@ def main() -> None:
     if args.stage in ("label", "all"):
         stage_label(
             args.out_dir, base_url, api_key, model,
-            args.max_calls, args.concurrency, args.min_confidence, args.seed, args.stop_when_rare,
+            args.max_calls, args.concurrency, args.min_confidence, args.seed,
         )
     if args.stage in ("export", "all"):
         stage_export(args.out_dir)

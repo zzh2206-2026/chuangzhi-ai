@@ -1,5 +1,7 @@
 # GitHub rejects files larger than 100MB. Keep this archive on disk.
 高楠数据集.zip
+datazip_MiMo精标_给队友(1).zip
+scut15k_MiMo精标_给队友(1).zip
 
 __pycache__/
 *.pyc
